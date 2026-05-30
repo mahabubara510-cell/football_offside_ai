@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OFFSIDE — Football AI Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ── Reset & Variables ───────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0a0c0f;
+    --surface:   #111419;
+    --border:    #1e2329;
+    --border-hi: #2e3640;
+    --text:      #c8d0da;
+    --text-dim:  #5a6472;
+    --accent:    #e8f000;
+    --red:       #ff3c3c;
+    --green:     #00e676;
+    --blue:      #00bfff;
+    --font-head: 'Barlow Condensed', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  /* ── Scanline overlay ────────────────────────────────────────── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.07) 2px,
+      rgba(0,0,0,0.07) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Layout ──────────────────────────────────────────────────── */
+  .shell {
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  /* ── Header ──────────────────────────────────────────────────── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--surface);
+  }
+
+  .logo {
+    font-family: var(--font-head);
+    font-size: 28px;
+    font-weight: 900;
+    letter-spacing: 0.12em;
+    color: #fff;
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--accent); }
+
+  .header-meta {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-align: right;
+  }
+  .status-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  /* ── Main ────────────────────────────────────────────────────── */
+  main {
+    padding: 40px 32px;
+    max-width: 1100px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  /* ── Upload zone ─────────────────────────────────────────────── */
+  #upload-zone {
+    border: 1.5px dashed var(--border-hi);
+    border-radius: 4px;
+    padding: 60px 40px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+    background: var(--surface);
+  }
+  #upload-zone:hover, #upload-zone.drag-over {
+    border-color: var(--accent);
+    background: #13160d;
+  }
+  #upload-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%;
+  }
+
+  .upload-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+    display: block;
+  }
+  .upload-title {
+    font-family: var(--font-head);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+  .upload-sub {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+  }
+  .upload-sub strong { color: var(--accent); }
+
+  /* ── Grid: preview + results ─────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-top: 28px;
+  }
+
+  @media (max-width: 760px) {
+    .grid { grid-template-columns: 1fr; }
+    main { padding: 24px 16px; }
+    header { padding: 14px 16px; }
+  }
+
+  /* ── Panel ───────────────────────────────────────────────────── */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .panel-header .tag {
+    background: var(--border-hi);
+    padding: 1px 6px;
+    border-radius: 2px;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .panel-body {
+    padding: 16px;
+  }
+
+  /* ── Video elements ──────────────────────────────────────────── */
+  video {
+    width: 100%;
+    max-height: 480px;
+    border-radius: 2px;
+    background: #000;
+    display: block;
+    object-fit: contain;
+  }
+  .video-placeholder {
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: #0d0f12;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+  }
+
+  /* ── Analyze button ──────────────────────────────────────────── */
+  #analyze-btn {
+    margin-top: 20px;
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 3px;
+    font-family: var(--font-head);
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    display: none;
+  }
+  #analyze-btn:hover  { opacity: 0.88; }
+  #analyze-btn:active { transform: scale(0.99); }
+  #analyze-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  /* ── Processing bar ──────────────────────────────────────────── */
+  #processing-bar {
+    display: none;
+    margin-top: 20px;
+  }
+  .bar-label {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .bar-track {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    width: 0%;
+    animation: indeterminate 1.6s ease-in-out infinite;
+    transform-origin: left;
+  }
+  @keyframes indeterminate {
+    0%   { transform: translateX(-100%) scaleX(0.4); }
+    50%  { transform: translateX(60%)   scaleX(0.6); }
+    100% { transform: translateX(200%)  scaleX(0.4); }
+  }
+
+  /* ── Verdict ─────────────────────────────────────────────────── */
+  #verdict-box {
+    display: none;
+    margin-top: 20px;
+    padding: 20px;
+    border-radius: 3px;
+    text-align: center;
+    border: 1.5px solid;
+    animation: verdict-in 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes verdict-in {
+    from { opacity: 0; transform: translateY(10px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)    scale(1); }
+  }
+  #verdict-box.offside {
+    background: rgba(255,60,60,0.07);
+    border-color: var(--red);
+  }
+  #verdict-box.onside {
+    background: rgba(0,230,118,0.07);
+    border-color: var(--green);
+  }
+  .verdict-label {
+    font-family: var(--font-head);
+    font-size: 52px;
+    font-weight: 900;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    line-height: 1;
+  }
+  .verdict-label.offside { color: var(--red); }
+  .verdict-label.onside  { color: var(--green); }
+  .verdict-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    margin-top: 6px;
+  }
+
+  /* ── Error box ───────────────────────────────────────────────── */
+  #error-box {
+    display: none;
+    margin-top: 20px;
+    padding: 14px 16px;
+    border: 1px solid var(--red);
+    background: rgba(255,60,60,0.06);
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--red);
+    letter-spacing: 0.03em;
+  }
+
+  /* ── Log table ───────────────────────────────────────────────── */
+  #log-section {
+    display: none;
+    margin-top: 28px;
+  }
+  .log-title {
+    font-family: var(--font-head);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  thead tr {
+    background: var(--border);
+  }
+  th {
+    padding: 8px 12px;
+    text-align: left;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono);
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .tid { color: var(--blue); }
+  .frame-num { color: var(--accent); }
+  .from-null { color: var(--text-dim); font-style: italic; }
+
+  /* ── Download button ─────────────────────────────────────────── */
+  #download-btn {
+    display: none;
+    margin-top: 12px;
+    width: 100%;
+    padding: 12px;
+    background: transparent;
+    color: var(--accent);
+    border: 1.5px solid var(--accent);
+    border-radius: 3px;
+    font-family: var(--font-head);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    cursor: pointer;
+    text-align: center;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  #download-btn:hover {
+    background: var(--accent);
+    color: #000;
+  }
+
+  /* ── Reset btn ───────────────────────────────────────────────── */
+  #reset-btn {
+    display: none;
+    margin-top: 16px;
+    background: none;
+    border: 1px solid var(--border-hi);
+    color: var(--text-dim);
+    padding: 8px 20px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  #reset-btn:hover { border-color: var(--text-dim); color: var(--text); }
+
+  /* ── Footer ──────────────────────────────────────────────────── */
+  footer {
+    padding: 14px 32px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── Header ───────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">OFF<span>SIDE</span> <span style="color:var(--text-dim);font-size:14px;font-weight:400;">AI</span></div>
+    <div class="header-meta">
+      <div><span class="status-dot"></span>SYSTEM ONLINE</div>
+      <div style="margin-top:2px;">Football Offside Detection Engine</div>
+    </div>
+  </header>
+
+  <!-- ── Main ─────────────────────────────────────────────────── -->
+  <main>
+
+    <!-- Upload zone -->
+    <div id="upload-zone">
+      <input type="file" id="file-input" accept="video/*" />
+      <span class="upload-icon">⬡</span>
+      <div class="upload-title">Drop your football clip here</div>
+      <div class="upload-sub">or click to browse &nbsp;·&nbsp; <strong>MP4 / MOV / AVI</strong> accepted</div>
+    </div>
+
+    <!-- Video grid (hidden until file selected) -->
+    <div class="grid" id="video-grid" style="display:none;">
+
+      <!-- Left: uploaded preview -->
+      <div class="panel">
+        <div class="panel-header">
+          INPUT <span class="tag">ORIGINAL</span>
+        </div>
+        <div class="panel-body">
+          <video id="input-video" controls playsinline></video>
+          <div style="margin-top:10px;font-size:11px;color:var(--text-dim);">
+            <span id="file-name"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: output video or placeholder -->
+      <div class="panel">
+        <div class="panel-header">
+          OUTPUT <span class="tag" id="output-tag">PENDING</span>
+        </div>
+        <div class="panel-body">
+          <div class="video-placeholder" id="output-placeholder">
+            AWAITING ANALYSIS
+          </div>
+          <video id="output-video" controls playsinline style="display:none;"></video>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Analyze button -->
+    <button id="analyze-btn">▶ &nbsp; Run Analysis</button>
+
+    <!-- Download result button -->
+    <a id="download-btn" style="display:none;" href="#" download="offside_analysis.mp4">
+      ⬇ &nbsp; Download Result Video
+    </a>
+
+    <!-- Processing indicator -->
+    <div id="processing-bar">
+      <div class="bar-label">
+        <span>PROCESSING</span>
+        <span id="processing-status">Running pipeline…</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill"></div></div>
+    </div>
+
+    <!-- Error -->
+    <div id="error-box"></div>
+
+    <!-- Verdict -->
+    <div id="verdict-box">
+      <div class="verdict-label" id="verdict-label"></div>
+      <div class="verdict-sub" id="verdict-sub"></div>
+    </div>
+
+    <!-- Reset -->
+    <button id="reset-btn">↺ &nbsp; Analyze another clip</button>
+
+    <!-- Involvement log -->
+    <div id="log-section">
+      <div class="log-title">Involvement Log</div>
+      <div class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Frame</th>
+              <th>Player (Offside)</th>
+              <th>Received From</th>
+            </tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Footer ───────────────────────────────────────────────── -->
+  <footer>
+    <span>OFFSIDE AI — Football Computer Vision</span>
+    <span>FastAPI + YOLOv8 + ByteTrack</span>
+  </footer>
+
+</div>
+
+<script>
+  const fileInput      = document.getElementById('file-input');
+  const uploadZone     = document.getElementById('upload-zone');
+  const videoGrid      = document.getElementById('video-grid');
+  const inputVideo     = document.getElementById('input-video');
+  const outputVideo    = document.getElementById('output-video');
+  const outputPH       = document.getElementById('output-placeholder');
+  const outputTag      = document.getElementById('output-tag');
+  const fileName       = document.getElementById('file-name');
+  const analyzeBtn     = document.getElementById('analyze-btn');
+  const processingBar  = document.getElementById('processing-bar');
+  const processingStatus = document.getElementById('processing-status');
+  const errorBox       = document.getElementById('error-box');
+  const verdictBox     = document.getElementById('verdict-box');
+  const verdictLabel   = document.getElementById('verdict-label');
+  const verdictSub     = document.getElementById('verdict-sub');
+  const resetBtn       = document.getElementById('reset-btn');
+  const downloadBtn    = document.getElementById('download-btn');
+  const logSection     = document.getElementById('log-section');
+  const logBody        = document.getElementById('log-body');
+
+  let selectedFile = null;
+
+  // ── Drag & drop ──────────────────────────────────────────────
+  uploadZone.addEventListener('dragover', e => {
+    e.preventDefault(); uploadZone.classList.add('drag-over');
+  });
+  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+  uploadZone.addEventListener('drop', e => {
+    e.preventDefault(); uploadZone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f) handleFile(f);
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+  function handleFile(file) {
+    selectedFile = file;
+    // show preview
+    const url = URL.createObjectURL(file);
+    inputVideo.src = url;
+    fileName.textContent = file.name + '  (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)';
+
+    // show grid & analyze button
+    videoGrid.style.display = 'grid';
+    analyzeBtn.style.display = 'block';
+
+    // reset state
+    hide(errorBox); hide(verdictBox); hide(resetBtn); hide(downloadBtn); hide(logSection);
+    outputVideo.style.display = 'none';
+    outputPH.style.display = 'flex';
+    outputTag.textContent = 'PENDING';
+    logBody.innerHTML = '';
+  }
+
+  // ── Analyze ───────────────────────────────────────────────────
+  analyzeBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    // UI: start loading
+    analyzeBtn.disabled = true;
+    show(processingBar);
+    hide(errorBox); hide(verdictBox); hide(resetBtn); hide(downloadBtn); hide(logSection);
+    processingStatus.textContent = 'Validating video…';
+
+    const formData = new FormData();
+    formData.append('video', selectedFile);
+
+    try {
+      processingStatus.textContent = 'Running pipeline…';
+
+      const res = await fetch('/analyze', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        // Validation or pipeline error
+        showError(data.detail || 'An unknown error occurred.');
+        return;
+      }
+
+      // ── Success ──────────────────────────────────────────────
+      const verdict = data.verdict; // "OFFSIDE" | "ONSIDE"
+
+      // show output video
+      outputPH.style.display = 'none';
+      outputVideo.src = data.output_video_url + '?t=' + Date.now(); // cache-bust
+      outputVideo.type = 'video/mp4';
+      outputVideo.load();   // ← CRITICAL: force browser to reload the new src
+      outputVideo.style.display = 'block';
+      outputTag.textContent = 'READY';
+
+      // show download button
+      downloadBtn.href = data.output_video_url;
+      downloadBtn.download = 'offside_analysis.mp4';
+      show(downloadBtn);
+
+      // verdict banner
+      verdictLabel.textContent = verdict;
+      verdictLabel.className   = 'verdict-label ' + verdict.toLowerCase();
+      verdictBox.className     = 'verdict-box ' + verdict.toLowerCase(); // typo-safe
+      verdictBox.id            = 'verdict-box'; // keep id
+      verdictBox.classList.add(verdict.toLowerCase());
+
+      const events = data.total_events;
+      verdictSub.textContent = events > 0
+        ? `${events} offside involvement event${events > 1 ? 's' : ''} detected`
+        : 'No offside involvement events detected';
+
+      show(verdictBox);
+
+      // log table
+      if (data.involvement_log && data.involvement_log.length > 0) {
+        logBody.innerHTML = data.involvement_log.map((e, i) => `
+          <tr>
+            <td>${i + 1}</td>
+            <td class="frame-num">${e.frame}</td>
+            <td class="tid">#${e.tracker_id}</td>
+            <td>${e.from_player != null
+              ? `<span class="tid">#${e.from_player}</span>`
+              : `<span class="from-null">loose ball</span>`}
+            </td>
+          </tr>
+        `).join('');
+        show(logSection);
+      }
+
+      show(resetBtn);
+
+    } catch (err) {
+      showError('Network error — is the server running? ' + err.message);
+    } finally {
+      hide(processingBar);
+      analyzeBtn.disabled = false;
+    }
+  });
+
+  // ── Reset ────────────────────────────────────────────────────
+  resetBtn.addEventListener('click', () => {
+    selectedFile = null;
+    fileInput.value = '';
+    inputVideo.src = '';
+    videoGrid.style.display = 'none';
+    analyzeBtn.style.display = 'none';
+    hide(processingBar); hide(errorBox); hide(verdictBox);
+    hide(resetBtn); hide(downloadBtn); hide(logSection);
+    outputVideo.style.display = 'none';
+    outputPH.style.display = 'flex';
+    outputTag.textContent = 'PENDING';
+    logBody.innerHTML = '';
+    verdictBox.className = '';
+    verdictBox.id = 'verdict-box';
+  });
+
+  // ── Helpers ──────────────────────────────────────────────────
+  function show(el) { el.style.display = 'block'; }
+  function hide(el) { el.style.display = 'none'; }
+
+  function showError(msg) {
+    errorBox.textContent = '⚠ ' + msg;
+    show(errorBox);
+    show(resetBtn);
+    hide(processingBar);
+    analyzeBtn.disabled = false;
+  }
+</script>
+</body>
+</html>
