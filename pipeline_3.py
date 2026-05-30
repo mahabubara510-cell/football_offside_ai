@@ -1,7 +1,6 @@
 import numpy as np
 from collections import deque
 import supervision as sv
-from ultralytics import YOLO
 from tqdm import tqdm
 from sports.annotators.soccer import draw_pitch, draw_points_on_pitch, draw_paths_on_pitch
 from sports.configs.soccer import SoccerPitchConfiguration
@@ -15,22 +14,9 @@ from offside_2 import (
     get_ball_possessor,
     check_offside_involvement,
 )
-from huggingface_hub import hf_hub_download
 import torch
 
-
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-# ── Models (loaded once at import time) ───────────────────────────────────────
-pitch_detector = YOLO(hf_hub_download(
-    repo_id="Sabkat/football-pitch-detection",
-    filename="football-pitch-detection.pt"
-)).to(device)
-
-player_detector = YOLO(hf_hub_download(
-    repo_id="Sabkat/football-player-detection",
-    filename="football-player-detection.pt"
-)).to(device)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CONFIG = SoccerPitchConfiguration()
@@ -103,21 +89,26 @@ def pad_to_height(img: np.ndarray, target_h: int) -> np.ndarray:
 
 
 # ── Phase 1: collect crops and fit team classifier ────────────────────────────
-def collect_crops_and_fit_classifier(source_path: str) -> TeamClassifier:
+def collect_crops_and_fit_classifier(
+    source_path: str,
+    player_detector,
+) -> TeamClassifier:
     """
     Samples frames from the video, collects player crops,
     fits and returns a TeamClassifier.
-    Called once before run_pipeline.
+    Models passed in from main.py — not reloaded here.
     """
     print("Collecting player crops for team classification...")
-    frame_generator = sv.get_video_frames_generator(source_path=source_path, stride=STRIDE)
+    frame_generator = sv.get_video_frames_generator(
+        source_path=source_path, stride=STRIDE)
 
     crops = []
     for frame in tqdm(frame_generator, desc='collecting crops'):
         result             = player_detector(frame, conf=0.3, device=device)[0]
         detections         = sv.Detections.from_ultralytics(result)
         players_detections = detections[detections.class_id == PLAYER_ID]
-        players_crops      = [sv.crop_image(frame, xyxy) for xyxy in players_detections.xyxy]
+        players_crops      = [sv.crop_image(frame, xyxy)
+                               for xyxy in players_detections.xyxy]
         crops             += players_crops
 
     team_classifier = TeamClassifier(device=device)
@@ -127,13 +118,21 @@ def collect_crops_and_fit_classifier(source_path: str) -> TeamClassifier:
 
 
 # ── Phase 2: full pipeline ────────────────────────────────────────────────────
-def run_pipeline(source_path: str, output_path: str) -> dict:
+def run_pipeline(
+    source_path: str,
+    output_path: str,
+    player_detector,
+    pitch_detector,
+) -> dict:
     """
     Runs the full detection + offside analysis pipeline.
+    Models are passed in from main.py — loaded only once across the app.
 
     Args:
-        source_path : path to the input video
-        output_path : path where the annotated output video will be saved
+        source_path    : path to the input video
+        output_path    : path where the annotated output video will be saved
+        player_detector: YOLO model for player/ball/referee detection
+        pitch_detector : YOLO model for pitch keypoint detection
 
     Returns:
         {
@@ -143,7 +142,8 @@ def run_pipeline(source_path: str, output_path: str) -> dict:
         }
     """
     # fit classifier fresh for this video
-    team_classifier = collect_crops_and_fit_classifier(source_path)
+    team_classifier = collect_crops_and_fit_classifier(
+        source_path, player_detector)
 
     tracker = sv.ByteTrack()
     tracker.reset()
@@ -180,7 +180,9 @@ def run_pipeline(source_path: str, output_path: str) -> dict:
     )
 
     with sv.VideoSink(output_path, out_info) as sink:
-        for frame in tqdm(frame_generator, total=video_info.total_frames, desc='main pipeline'):
+        for frame in tqdm(frame_generator,
+                          total=video_info.total_frames,
+                          desc='main pipeline'):
 
             annotated_frame = frame.copy()
 
@@ -207,56 +209,82 @@ def run_pipeline(source_path: str, output_path: str) -> dict:
                     target=frame_reference_points
                 )
                 pitch_all_points = np.array(CONFIG.vertices)
-                frame_all_points = overlay_transformer.transform_points(points=pitch_all_points)
-                frame_all_kp     = sv.KeyPoints(xy=frame_all_points[np.newaxis, ...])
-                frame_ref_kp     = sv.KeyPoints(xy=frame_reference_points[np.newaxis, ...])
+                frame_all_points = overlay_transformer.transform_points(
+                    points=pitch_all_points)
+                frame_all_kp = sv.KeyPoints(
+                    xy=frame_all_points[np.newaxis, ...])
+                frame_ref_kp = sv.KeyPoints(
+                    xy=frame_reference_points[np.newaxis, ...])
 
-                annotated_frame = edge_annotator.annotate(scene=annotated_frame, key_points=frame_all_kp)
-                annotated_frame = vertex_annotator.annotate(scene=annotated_frame, key_points=frame_ref_kp)
+                annotated_frame = edge_annotator.annotate(
+                    scene=annotated_frame, key_points=frame_all_kp)
+                annotated_frame = vertex_annotator.annotate(
+                    scene=annotated_frame, key_points=frame_ref_kp)
             else:
                 if len(frame_reference_points) > 0:
-                    frame_ref_kp    = sv.KeyPoints(xy=frame_reference_points[np.newaxis, ...])
-                    annotated_frame = vertex_annotator.annotate(scene=annotated_frame, key_points=frame_ref_kp)
+                    frame_ref_kp = sv.KeyPoints(
+                        xy=frame_reference_points[np.newaxis, ...])
+                    annotated_frame = vertex_annotator.annotate(
+                        scene=annotated_frame, key_points=frame_ref_kp)
 
             # ── Player detection ──────────────────────────────────────────────
             player_result = player_detector(frame, conf=0.3, device=device)[0]
             detections    = sv.Detections.from_ultralytics(player_result)
 
             ball_detections      = detections[detections.class_id == BALL_ID]
-            ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
+            ball_detections.xyxy = sv.pad_boxes(
+                xyxy=ball_detections.xyxy, px=10)
 
             all_detections = detections[detections.class_id != BALL_ID]
-            all_detections = all_detections.with_nms(threshold=0.5, class_agnostic=True)
-            all_detections = tracker.update_with_detections(detections=all_detections)
+            all_detections = all_detections.with_nms(
+                threshold=0.5, class_agnostic=True)
+            all_detections = tracker.update_with_detections(
+                detections=all_detections)
 
-            goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
-            players_detections     = all_detections[all_detections.class_id == PLAYER_ID]
-            referees_detections    = all_detections[all_detections.class_id == REFEREE_ID]
+            goalkeepers_detections = all_detections[
+                all_detections.class_id == GOALKEEPER_ID]
+            players_detections     = all_detections[
+                all_detections.class_id == PLAYER_ID]
+            referees_detections    = all_detections[
+                all_detections.class_id == REFEREE_ID]
 
-            players_crops = [sv.crop_image(frame, xyxy) for xyxy in players_detections.xyxy]
-            players_detections.class_id = team_classifier.predict(players_crops)
+            players_crops = [sv.crop_image(frame, xyxy)
+                             for xyxy in players_detections.xyxy]
+            players_detections.class_id = team_classifier.predict(
+                players_crops)
 
-            if len(goalkeepers_detections) > 0 and len(players_detections) > 0:
+            if (len(goalkeepers_detections) > 0
+                    and len(players_detections) > 0):
                 goalkeepers_detections.class_id = resolve_goalkeepers_team_id(
                     players_detections, goalkeepers_detections)
 
-            referees_detections.class_id = np.full(len(referees_detections), 2)
+            referees_detections.class_id = np.full(
+                len(referees_detections), 2)
 
             all_detections = sv.Detections.merge([
-                players_detections, goalkeepers_detections, referees_detections])
+                players_detections,
+                goalkeepers_detections,
+                referees_detections,
+            ])
             all_detections.class_id = all_detections.class_id.astype(int)
 
             labels = [f"#{tid}" for tid in all_detections.tracker_id]
 
-            annotated_frame = ellipse_annotator.annotate(scene=annotated_frame, detections=all_detections)
-            annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=all_detections, labels=labels)
-            annotated_frame = triangle_annotator.annotate(scene=annotated_frame, detections=ball_detections)
+            annotated_frame = ellipse_annotator.annotate(
+                scene=annotated_frame, detections=all_detections)
+            annotated_frame = label_annotator.annotate(
+                scene=annotated_frame,
+                detections=all_detections,
+                labels=labels)
+            annotated_frame = triangle_annotator.annotate(
+                scene=annotated_frame, detections=ball_detections)
 
             # ── Ball pitch coordinates ────────────────────────────────────────
             ball_pitch_x = None
             ball_pitch_y = None
             if transformer is not None and len(ball_detections) > 0:
-                ball_xy       = ball_detections.get_anchors_coordinates(sv.Position.CENTER)
+                ball_xy       = ball_detections.get_anchors_coordinates(
+                    sv.Position.CENTER)
                 ball_pitch_xy = transformer.transform_points(points=ball_xy)
                 if ball_pitch_xy.shape[0] == 1:
                     ball_pitch_x = float(ball_pitch_xy[0, 0])
@@ -304,65 +332,91 @@ def run_pipeline(source_path: str, output_path: str) -> dict:
             if transformer is not None:
 
                 if len(players_detections) > 0:
-                    players_xy       = players_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-                    players_pitch_xy = transformer.transform_points(points=players_xy)
+                    players_xy = players_detections.get_anchors_coordinates(
+                        sv.Position.BOTTOM_CENTER)
+                    players_pitch_xy = transformer.transform_points(
+                        points=players_xy)
 
                     team0_mask = players_detections.class_id == 0
                     if team0_mask.any():
                         radar_frame = safe_draw(draw_points_on_pitch(
-                            CONFIG, xy=players_pitch_xy[team0_mask],
+                            CONFIG,
+                            xy=players_pitch_xy[team0_mask],
                             face_color=sv.Color.from_hex('#00BFFF'),
                             edge_color=sv.Color.from_hex('#ffffff'),
-                            radius=8, padding=RADAR_PADDING, scale=RADAR_SCALE,
+                            radius=8,
+                            padding=RADAR_PADDING,
+                            scale=RADAR_SCALE,
                             pitch=radar_frame
                         ), radar_frame)
 
                     team1_mask = players_detections.class_id == 1
                     if team1_mask.any():
                         radar_frame = safe_draw(draw_points_on_pitch(
-                            CONFIG, xy=players_pitch_xy[team1_mask],
+                            CONFIG,
+                            xy=players_pitch_xy[team1_mask],
                             face_color=sv.Color.from_hex('#FF1493'),
                             edge_color=sv.Color.from_hex('#ffffff'),
-                            radius=8, padding=RADAR_PADDING, scale=RADAR_SCALE,
+                            radius=8,
+                            padding=RADAR_PADDING,
+                            scale=RADAR_SCALE,
                             pitch=radar_frame
                         ), radar_frame)
 
                 if len(goalkeepers_detections) > 0:
-                    gk_xy       = goalkeepers_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                    gk_xy = goalkeepers_detections.get_anchors_coordinates(
+                        sv.Position.BOTTOM_CENTER)
                     gk_pitch_xy = transformer.transform_points(points=gk_xy)
-                    for pt, cid in zip(gk_pitch_xy, goalkeepers_detections.class_id):
-                        col = sv.Color.from_hex('#00BFFF') if cid == 0 else sv.Color.from_hex('#FF1493')
+                    for pt, cid in zip(gk_pitch_xy,
+                                       goalkeepers_detections.class_id):
+                        col = (sv.Color.from_hex('#00BFFF')
+                               if cid == 0
+                               else sv.Color.from_hex('#FF1493'))
                         radar_frame = safe_draw(draw_points_on_pitch(
-                            CONFIG, xy=pt[np.newaxis],
+                            CONFIG,
+                            xy=pt[np.newaxis],
                             face_color=col,
                             edge_color=sv.Color.from_hex('#000000'),
-                            radius=10, padding=RADAR_PADDING, scale=RADAR_SCALE,
+                            radius=10,
+                            padding=RADAR_PADDING,
+                            scale=RADAR_SCALE,
                             pitch=radar_frame
                         ), radar_frame)
 
                 if len(referees_detections) > 0:
-                    ref_xy       = referees_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-                    ref_pitch_xy = transformer.transform_points(points=ref_xy)
-                    radar_frame  = safe_draw(draw_points_on_pitch(
-                        CONFIG, xy=ref_pitch_xy,
+                    ref_xy = referees_detections.get_anchors_coordinates(
+                        sv.Position.BOTTOM_CENTER)
+                    ref_pitch_xy = transformer.transform_points(
+                        points=ref_xy)
+                    radar_frame = safe_draw(draw_points_on_pitch(
+                        CONFIG,
+                        xy=ref_pitch_xy,
                         face_color=sv.Color.from_hex('#FFD700'),
                         edge_color=sv.Color.from_hex('#000000'),
-                        radius=8, padding=RADAR_PADDING, scale=RADAR_SCALE,
+                        radius=8,
+                        padding=RADAR_PADDING,
+                        scale=RADAR_SCALE,
                         pitch=radar_frame
                     ), radar_frame)
 
                 if len(ball_detections) > 0:
-                    ball_xy       = ball_detections.get_anchors_coordinates(sv.Position.CENTER)
-                    ball_pitch_xy = transformer.transform_points(points=ball_xy)
+                    ball_xy = ball_detections.get_anchors_coordinates(
+                        sv.Position.CENTER)
+                    ball_pitch_xy = transformer.transform_points(
+                        points=ball_xy)
                     if ball_pitch_xy.shape[0] == 1:
                         ball_trail.append(ball_pitch_xy.flatten())
                     else:
-                        ball_trail.append(np.empty((0,), dtype=np.float32))
+                        ball_trail.append(
+                            np.empty((0,), dtype=np.float32))
                     radar_frame = safe_draw(draw_points_on_pitch(
-                        CONFIG, xy=ball_pitch_xy,
+                        CONFIG,
+                        xy=ball_pitch_xy,
                         face_color=sv.Color.from_hex('#ffffff'),
                         edge_color=sv.Color.from_hex('#000000'),
-                        radius=6, padding=RADAR_PADDING, scale=RADAR_SCALE,
+                        radius=6,
+                        padding=RADAR_PADDING,
+                        scale=RADAR_SCALE,
                         pitch=radar_frame
                     ), radar_frame)
                 else:
@@ -380,13 +434,18 @@ def run_pipeline(source_path: str, output_path: str) -> dict:
 
             # ── Highlight offside players on radar ────────────────────────────
             if transformer is not None and offside_mask.any():
-                offside_xy       = players_detections[offside_mask].get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-                offside_pitch_xy = transformer.transform_points(points=offside_xy)
+                offside_xy = players_detections[offside_mask]\
+                    .get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                offside_pitch_xy = transformer.transform_points(
+                    points=offside_xy)
                 radar_frame = safe_draw(draw_points_on_pitch(
-                    CONFIG, xy=offside_pitch_xy,
+                    CONFIG,
+                    xy=offside_pitch_xy,
                     face_color=sv.Color.from_hex('#FF0000'),
                     edge_color=sv.Color.from_hex('#ffffff'),
-                    radius=10, padding=RADAR_PADDING, scale=RADAR_SCALE,
+                    radius=10,
+                    padding=RADAR_PADDING,
+                    scale=RADAR_SCALE,
                     pitch=radar_frame
                 ), radar_frame)
 
@@ -410,8 +469,7 @@ def run_pipeline(source_path: str, output_path: str) -> dict:
     verdict = "OFFSIDE" if len(involvement_log) > 0 else "ONSIDE"
 
     return {
-        "verdict":          verdict,
-        "involvement_log":  involvement_log,
-        "output_path":      output_path,
+        "verdict":         verdict,
+        "involvement_log": involvement_log,
+        "output_path":     output_path,
     }
-
